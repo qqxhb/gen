@@ -9,8 +9,8 @@ var (
 	{{end -}}
 )
 
-func SetDefault(db *gorm.DB) {
-	*Q = *Use(db)
+func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
+	*Q = *Use(db,opts...)
 	{{range $name,$d :=.Data -}}
 	{{$d.ModelStructName}} = &Q.{{$d.ModelStructName}}
 	{{end -}}
@@ -20,11 +20,11 @@ func SetDefault(db *gorm.DB) {
 
 // QueryMethod query method template
 const QueryMethod = `
-func Use(db *gorm.DB) *Query {
+func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
 		db: db,
 		{{range $name,$d :=.Data -}}
-		{{$d.ModelStructName}}: new{{$d.ModelStructName}}(db),
+		{{$d.ModelStructName}}: new{{$d.ModelStructName}}(db,opts...),
 		{{end -}}
 	}
 }
@@ -49,15 +49,20 @@ func (q *Query) clone(db *gorm.DB) *Query {
 }
 
 func (q *Query) ReadDB() *Query {
-	return q.clone(q.db.Clauses(dbresolver.Read))
+	return q.ReplaceDB(q.db.Clauses(dbresolver.Read))
 }
 
 func (q *Query) WriteDB() *Query {
-	return q.clone(q.db.Clauses(dbresolver.Write))
+	return q.ReplaceDB(q.db.Clauses(dbresolver.Write))
 }
 
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
-	return q.clone(db)
+	return &Query{
+		db: db,
+		{{range $name,$d :=.Data -}}
+		{{$d.ModelStructName}}: q.{{$d.ModelStructName}}.replaceDB(db),
+		{{end}}
+	}
 }
 
 type queryCtx struct{ 

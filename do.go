@@ -27,10 +27,11 @@ var _ Dao = new(DO)
 // DO (data object): implement basic query methods
 // the structure embedded with a *gorm.DB, and has a element item "alias" will be used when used as a sub query
 type DO struct {
+	*DOConfig
 	db        *gorm.DB
 	alias     string // for subquery
 	modelType reflect.Type
-	schema    *schema.Schema
+	tableName string
 
 	backfillData interface{}
 }
@@ -48,16 +49,30 @@ var (
 )
 
 // UseDB specify a db connection(*gorm.DB)
-func (d *DO) UseDB(db *gorm.DB, opts ...doOptions) {
+func (d *DO) UseDB(db *gorm.DB, opts ...DOOption) {
 	db = db.Session(&gorm.Session{Context: context.Background()})
-	for _, opt := range opts {
-		db = opt(db)
-	}
 	d.db = db
+	config := &DOConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			if applyErr := opt.Apply(config); applyErr != nil {
+				panic(applyErr)
+			}
+		}
+	}
+	d.DOConfig = config
 }
 
 // ReplaceDB replace db connection
-func (d *DO) ReplaceDB(db *gorm.DB) { d.db = db }
+func (d *DO) ReplaceDB(db *gorm.DB) {
+	d.db = db.Session(&gorm.Session{})
+}
+
+// ReplaceConnPool replace db connection pool
+func (d *DO) ReplaceConnPool(pool gorm.ConnPool) {
+	d.db = d.db.Session(&gorm.Session{Initialized: true}).Session(&gorm.Session{})
+	d.db.Statement.ConnPool = pool
+}
 
 // UseModel specify a data model structure as a source for table name
 func (d *DO) UseModel(model interface{}) {
@@ -67,7 +82,7 @@ func (d *DO) UseModel(model interface{}) {
 	if err != nil {
 		panic(fmt.Errorf("Cannot parse model: %+v\n%w", model, err))
 	}
-	d.schema = d.db.Statement.Schema
+	d.tableName = d.db.Statement.Schema.Table
 }
 
 func (d *DO) indirect(value interface{}) reflect.Type {
@@ -81,15 +96,13 @@ func (d *DO) indirect(value interface{}) reflect.Type {
 // UseTable specify table name
 func (d *DO) UseTable(tableName string) {
 	d.db = d.db.Table(tableName).Session(new(gorm.Session))
-	d.schema.Table = tableName
+	//d.db.Statement.Schema.Table=tableName
+	d.tableName = tableName
 }
 
 // TableName return table name
 func (d DO) TableName() string {
-	if d.schema == nil {
-		return ""
-	}
-	return d.schema.Table
+	return d.tableName
 }
 
 // Returning backfill data
@@ -243,11 +256,16 @@ func (d *DO) Order(columns ...field.Expr) Dao {
 
 func (d *DO) toOrderValue(columns ...field.Expr) string {
 	// eager build Columns
-	orderArray := make([]string, len(columns))
+	stmt := &gorm.Statement{DB: d.db.Statement.DB, Table: d.db.Statement.Table, Schema: d.db.Statement.Schema}
+
 	for i, c := range columns {
-		orderArray[i] = c.Build(d.db.Statement).String()
+		if i != 0 {
+			stmt.WriteByte(',')
+		}
+		c.Build(stmt)
 	}
-	return strings.Join(orderArray, ",")
+
+	return stmt.SQL.String()
 }
 
 // Distinct ...
@@ -268,11 +286,17 @@ func (d *DO) Group(columns ...field.Expr) Dao {
 	if len(columns) == 0 {
 		return d
 	}
-	name := string(columns[0].Build(d.db.Statement))
-	for _, col := range columns[1:] {
-		name += "," + string(col.Build(d.db.Statement))
+
+	stmt := &gorm.Statement{DB: d.db.Statement.DB, Table: d.db.Statement.Table, Schema: d.db.Statement.Schema}
+
+	for i, c := range columns {
+		if i != 0 {
+			stmt.WriteByte(',')
+		}
+		c.Build(stmt)
 	}
-	return d.getInstance(d.db.Group(name))
+
+	return d.getInstance(d.db.Group(stmt.SQL.String()))
 }
 
 // Having ...
@@ -483,13 +507,6 @@ func (d *DO) Joins(field field.RelationField) Dao {
 
 	return d.getInstance(d.db.Joins(field.Path(), args...))
 }
-
-// func (d *DO) Preload(column field.RelationPath, subQuery ...SubQuery) Dao {
-// 	if len(subQuery) > 0 {
-// 		return d.getInstance(d.db.Preload(string(column.Path()), subQuery[0].underlyingDB()))
-// 	}
-// 	return d.getInstance(d.db.Preload(string(column.Path())))
-// }
 
 // Preload ...
 func (d *DO) Preload(field field.RelationField) Dao {
